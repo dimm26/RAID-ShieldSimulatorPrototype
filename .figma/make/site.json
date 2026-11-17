@@ -1,0 +1,10 @@
+{
+  "description": "Learn RAID storage through an interactive simulator that visualizes data distribution, drive failures, recovery, and capacity for students and curious users.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
