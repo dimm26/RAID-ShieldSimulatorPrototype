@@ -50,7 +50,7 @@ export function GameOverPopup({ reason, day, points, raid, onRetry, onMenu }: { 
   )
 }
 
-export function WinPopup({ points, raid, onAgain, onMenu }: { points: number; raid: string | null; onAgain: () => void; onMenu: () => void }) {
+export function WinPopup({ points, raid, record = false, onAgain, onMenu }: { points: number; raid: string | null; record?: boolean; onAgain: () => void; onMenu: () => void }) {
   const [bonus, setBonus] = useState(0)
   const stars = starsFor(points)
   useEffect(() => {
@@ -93,6 +93,7 @@ export function WinPopup({ points, raid, onAgain, onMenu }: { points: number; ra
             </div>
           </div>
         </Win>
+        {record && <div className="absolute" style={{ left: -26, top: -22 }}><Sticker bg="#F7A8C8" rot={-8} className="!text-[16px] !px-4 !py-1">Rekor Baru!</Sticker></div>}
         <div className="absolute" style={{ right: -26, top: -22 }}><Sticker bg="#FFE94D" rot={8} className="!text-[16px] !px-4 !py-1">SYSDMIN LEGEND</Sticker></div>
       </div>
     </Backdrop>

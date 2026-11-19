@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { EFF, RAIDS, buildCells, colorFor, recoveryLine, type Raid } from './lib/sim'
 import { Pixel, Sticker, Win } from './components/ui'
 import { GameOverPopup, WinPopup, WIN_BONUS } from './components/EndPopups'
-import { HowTo, Overlay, Settings, StartScreen } from './components/Screens'
+import { Confirm, HowTo, PauseMenu, Settings, StartScreen } from './components/Screens'
+import { loadPrefs, loadRecords, savePrefs, saveRecords } from './lib/settings'
+import { sfx } from './lib/sfx'
 
 type Phase = 'idle' | 'processing' | 'stored'
 type DiskState = 'ok' | 'failed' | 'replaced' | 'rebuilding'
@@ -17,6 +19,16 @@ const OP_COST = 40 // daily operating cost
 const incomeFor = (avail: number) => Math.round((avail / 100) * RATE) - OP_COST
 const R_RAID0 = 'RAID 0: 1 disk rusak = data hilang'
 const R_NOMONEY = 'Modal habis, tidak bisa beli disk pengganti'
+const TIPS = [
+  'RAID 0 cepat, tapi tanpa redundansi.',
+  'RAID 1 menyalin data yang sama ke dua disk (mirroring).',
+  'RAID 5 memakai parity XOR untuk memulihkan 1 disk.',
+  'RAID 10 = mirror + stripe: cepat dan aman, tapi boros kapasitas.',
+  'RAID bukan pengganti backup!',
+  'Parity: A ⊕ B ⊕ P = 0, jadi blok yang hilang bisa dihitung ulang.',
+  'Parity RAID 5 berputar di semua disk agar beban merata.',
+  'Saat rebuild, array rentan: satu disk lain rusak bisa fatal.',
+]
 const TOLERANCE: Record<Raid, number> = { 'RAID 0': 1, 'RAID 1': 3, 'RAID 5': 2, 'RAID 10': 3 }
 
 function Decor() {
@@ -36,13 +48,18 @@ function Decor() {
   )
 }
 
-const JUMPS = ['0 Start', '0b Cara Bermain', '1 Idle', '2 RAID dipilih', '3 Processing', '4 Stored', '5 Failure', '6 Rebuild', '7 RAID 0 Data Lost', '8 Dark mode', '9 Game Over (uang)', '10 Menang', '11 Start (Gelap)', '12 Game Over (Gelap)', '13 Menang (Gelap)', '14 Hari 30 belum rebuild'] as const
-
 export default function App() {
   const [screen, setScreen] = useState<Screen>('start')
   const [modal, setModal] = useState<Modal>(null)
   const [seenHow, setSeenHow] = useState(false)
-  const [diff, setDiff] = useState(1)
+  const [diff, setDiff] = useState(() => loadPrefs().diff)
+  const [speed, setSpeed] = useState<1 | 2>(() => loadPrefs().speed)
+  const [sound, setSound] = useState(() => loadPrefs().sound)
+  const [confirm, setConfirm] = useState<'retry' | 'menu' | null>(null)
+  const [countdown, setCountdown] = useState<number | null>(null)
+  const [records, setRecords] = useState(loadRecords)
+  const [newRecord, setNewRecord] = useState(false)
+  const [tipIdx, setTipIdx] = useState(() => Math.floor(Math.random() * TIPS.length))
   const [text, setText] = useState('')
   const [raid, setRaid] = useState<Raid | null>(null)
   const [phase, setPhase] = useState<Phase>('idle')
@@ -50,25 +67,26 @@ export default function App() {
   const [disks, setDisks] = useState<DiskState[]>(ALL_OK)
   const [rebuildStep, setRebuildStep] = useState(0)
   const [lines, setLines] = useState<string[]>([])
-  const [dark, setDark] = useState(false)
+  const [dark, setDark] = useState(() => loadPrefs().dark)
   const [popup, setPopup] = useState(false)
   const [day, setDay] = useState(1)
   const [money, setMoney] = useState(1500)
   const [floats, setFloats] = useState<{ id: number; t: string; c: string }[]>([])
   const [paused, setPaused] = useState(false)
   const [over, setOver] = useState<Over>(null)
-  const [demo, setDemo] = useState(true)
   const [scale, setScale] = useState(1)
-  const [cur, setCur] = useState(0)
   const [debug, setDebug] = useState(false)
   const timers = useRef<number[]>([])
   const termRef = useRef<HTMLDivElement>(null)
   const tickRef = useRef<() => void>(() => {})
   const fid = useRef(0)
   const cooldown = useRef(0)
+  const dayRef = useRef(1)
+  const originRef = useRef<'header' | 'pause' | 'start'>('start')
+  const keyRef = useRef<(e: KeyboardEvent) => void>(() => {})
 
   useEffect(() => {
-    const f = () => setScale(Math.min(window.innerWidth / 1440, (window.innerHeight - 70) / 1024))
+    const f = () => setScale(Math.min(window.innerWidth / 1440, window.innerHeight / 1024))
     f()
     window.addEventListener('resize', f)
     return () => window.removeEventListener('resize', f)
@@ -76,6 +94,28 @@ export default function App() {
   useEffect(() => { termRef.current?.scrollTo({ top: 99999 }) }, [lines])
   useEffect(() => () => timers.current.forEach(clearTimeout), [])
   useEffect(() => { if (popup && !over) { const t = window.setTimeout(() => setPopup(false), 3200); return () => clearTimeout(t) } }, [popup, over])
+
+  dayRef.current = day
+  useEffect(() => { sfx.setEnabled(sound); savePrefs({ diff, speed, sound, dark }) }, [diff, speed, sound, dark])
+  useEffect(() => { const h = (e: KeyboardEvent) => keyRef.current(e); window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h) }, [])
+  useEffect(() => {
+    if (countdown === null || paused || modal || confirm) return
+    const t = window.setTimeout(() => setCountdown((c) => (c !== null && c > 1 ? c - 1 : null)), 800)
+    return () => clearTimeout(t)
+  }, [countdown, paused, modal, confirm])
+  const tipBucket = Math.floor((day - 1) / 10)
+  useEffect(() => { setTipIdx((i) => (i + 1 + Math.floor(Math.random() * (TIPS.length - 1))) % TIPS.length) }, [tipBucket, screen])
+  useEffect(() => {
+    if (!over) { setNewRecord(false); return }
+    const win = over.kind === 'win'
+    const score = win ? money + WIN_BONUS : money
+    const days = win ? 30 : day
+    const next = { bestScore: Math.max(records.bestScore, score), bestDays: Math.max(records.bestDays, days) }
+    setNewRecord(win && score > records.bestScore)
+    setRecords(next); saveRecords(next)
+    sfx.play(win ? 'win' : 'gameover')
+    // eslint-disable-next-line
+  }, [over])
 
   const later = (fn: () => void, ms: number) => { timers.current.push(window.setTimeout(fn, ms)) }
   const clear = () => { timers.current.forEach(clearTimeout); timers.current = [] }
@@ -99,8 +139,8 @@ export default function App() {
   const canStore = alive && !!raid && text.length > 0 && phase === 'idle'
   const canFail = alive && phase === 'stored' && disks.includes('ok')
   const canRebuild = alive && !!raid && raid !== 'RAID 0' && disks.includes('replaced') && !anyRebuilding
-  const clockOn = alive && !paused && !modal && !demo && phase === 'stored'
-  const lockPick = !demo && phase !== 'idle'
+  const clockOn = alive && !paused && !modal && !confirm && countdown === null && phase === 'stored'
+  const lockPick = phase !== 'idle'
 
   /* ---- game rules ---- */
   const endLost = (reason: string) => { clear(); setOver({ kind: 'lost', reason }); setPopup(false); say(`> !! GAME OVER: ${reason}`) }
@@ -108,7 +148,8 @@ export default function App() {
     if (!raid) return
     const next = disks.map((s, i) => (i === d ? 'failed' : s)) as DiskState[]
     setDisks(next); setPopup(true); cooldown.current = 2
-    say(`> !! ERROR: Disk ${d + 1} terbakar / tidak merespons`)
+    sfx.play('burn')
+    say(`> !! [Hari ${dayRef.current}] PERINGATAN: Disk ${d + 1} terbakar!`)
     const bad = next.filter((s) => s !== 'ok').length
     if (bad >= TOLERANCE[raid]) {
       setDisks(next)
@@ -124,11 +165,11 @@ export default function App() {
       return
     }
     const nd = day + 1
-    setDay(nd)
+    setDay(nd); dayRef.current = nd
     const inc = incomeFor(avail)
     addMoney(inc)
     const m = money + inc
-    if (nd % 5 === 0) say(`> [Hari ${nd}] Server stabil. Saldo $${m}`)
+    say(`> [Hari ${nd}] ${inc >= 0 ? `+${inc} poin dari server` : `${inc} poin (biaya operasional)`}`)
     if (cooldown.current > 0) cooldown.current--
     else {
       const p = (0.03 + nd * 0.008) * [0.6, 1, 1.5][diff]
@@ -139,33 +180,33 @@ export default function App() {
   }
   useEffect(() => {
     if (!clockOn) return
-    const id = window.setInterval(() => tickRef.current(), 1000)
+    const id = window.setInterval(() => tickRef.current(), 1000 / speed)
     return () => clearInterval(id)
-  }, [clockOn])
+  }, [clockOn, speed])
 
   const buy = (d: number) => {
     if (money < REPLACE_COST) return
-    setDemo(false)
-    addMoney(-REPLACE_COST)
+    addMoney(-REPLACE_COST); sfx.play('buy')
+    say(`> [Hari ${day}] Beli pengganti (-${REPLACE_COST} poin)`)
     setDisks((p) => p.map((s, i) => (i === d ? 'replaced' : s)) as DiskState[])
     say(`> Disk pengganti untuk Disk ${d + 1} dipasang ($${REPLACE_COST}). Klik "Jalankan Rebuild Data"`)
   }
   const startRebuild = () => {
-    setDemo(false); setRebuildStep(0); setPopup(false)
+    setRebuildStep(0); setPopup(false)
     setDisks((p) => p.map((s) => (s === 'replaced' ? 'rebuilding' : s)) as DiskState[])
     say('> Reading surviving blocks...')
   }
   // rebuild progress: 10 steps x 300ms = 3s
   useEffect(() => {
-    if (!anyRebuilding || !alive || paused || modal) return
+    if (!anyRebuilding || !alive || paused || modal || confirm || countdown !== null) return
     const id = window.setInterval(() => setRebuildStep((s) => s + 1), 300)
     return () => clearInterval(id)
-  }, [anyRebuilding, alive, paused, modal])
+  }, [anyRebuilding, alive, paused, modal, confirm, countdown])
   useEffect(() => {
     if (!anyRebuilding || !raid || rebuildStep === 0) return
     if (rebuildStep >= 10) {
       setDisks((p) => p.map((s) => (s === 'rebuilding' ? 'ok' : s)) as DiskState[])
-      setRebuildStep(0); say('> Rebuild complete. Integrity: OK')
+      setRebuildStep(0); say('> Rebuild complete. Integrity: OK'); say(`> [Hari ${day}] Rebuild selesai. Integritas: OK`); sfx.play('success')
       return
     }
     if ((rebuildStep - 1) % 3 === 0) {
@@ -184,56 +225,48 @@ export default function App() {
 
   /* ---- sim actions ---- */
   const store = (r: Raid, t: string) => {
-    clear(); setDemo(false); setRevealed(0); setDisks(ALL_OK); setPhase('processing')
+    clear(); setRevealed(0); setDisks(ALL_OK); setPhase('processing')
     const cs = buildCells(t, r)
     setLines([`> Memproses "${t}" dengan ${r}...`, '> Membagi data ke 4 disk via data bus'])
     cs.forEach((_, i) => later(() => setRevealed(i + 1), 500 + i * 280))
     later(() => { setPhase('stored'); say('> Data berhasil disimpan. Server online, hari berjalan!') }, 700 + cs.length * 280)
   }
   const manualFail = () => {
-    setDemo(false)
     const ok = disks.map((s, i) => (s === 'ok' ? i : -1)).filter((i) => i >= 0)
     failDisk(ok[Math.floor(Math.random() * ok.length)], money)
   }
   const resetSim = (r: Raid | null, t: string) => { clear(); setRaid(r); setText(t); setPhase('idle'); setRevealed(0); setDisks(ALL_OK); setRebuildStep(0); setPopup(false) }
-  const pickRaid = (r: Raid) => { setDemo(false); resetSim(r, text); setLines([`> ${r} dipilih (${EFF[r][0]}% kapasitas tersedia)`]) }
+  const pickRaid = (r: Raid) => { resetSim(r, text); setLines([`> ${r} dipilih (${EFF[r][0]}% kapasitas tersedia)`]) }
 
   const startGame = () => {
-    resetSim(null, 'DATA'); setScreen('game'); setModal(null); setSeenHow(true); setDemo(false); setPaused(false); setOver(null)
-    setDay(1); setMoney(START_POINTS); setFloats([]); cooldown.current = 2; setCur(2)
+    resetSim(null, 'DATA'); setScreen('game'); setModal(null); setSeenHow(true); setPaused(false); setOver(null); setConfirm(null); setCountdown(null)
+    setDay(1); setMoney(START_POINTS); setFloats([]); cooldown.current = 2
     setLines(['raid-shield:~$ boot server...', '> Pilih RAID, lalu "Proses Penyimpanan" untuk menyalakan server.'])
   }
-  const toMenu = () => { clear(); setScreen('start'); setModal(null); setOver(null); setPaused(false); setCur(0) }
+  const toMenu = () => { clear(); setScreen('start'); setModal(null); setOver(null); setPaused(false); setConfirm(null); setCountdown(null) }
   const pressStart = () => (seenHow ? startGame() : setModal('how'))
 
-  /* ---- prototype flow jumps ---- */
-  const setup = (o: { raid: Raid | null; text: string; stored?: boolean; disks?: DiskState[]; day?: number; money?: number; dark?: boolean; lines: string[]; over?: Over; step?: number; popup?: boolean }) => {
-    resetSim(o.raid, o.text); setScreen('game'); setModal(null); setDemo(true); setPaused(false); setSeenHow(true)
-    setPhase(o.stored ? 'stored' : 'idle'); setRevealed(o.stored ? buildCells(o.text, o.raid).length : 0)
-    setDisks(o.disks ?? ALL_OK); setDay(o.day ?? 1); setMoney(o.money ?? START_POINTS); setDark(!!o.dark); setLines(o.lines)
-    setOver(o.over ?? null); setRebuildStep(o.step ?? 0); setPopup(!!o.popup); setFloats([])
+  /* ---- settings / pause / shortcuts ---- */
+  const closeSettings = () => { setModal(null); if (originRef.current === 'header') { setPaused(false); setCountdown(3) } }
+  const openSettings = (from: 'header' | 'pause' | 'start') => { originRef.current = from; if (from === 'header') setPaused(true); setModal('settings') }
+  keyRef.current = (e) => {
+    if (e.key === 'Escape') {
+      if (confirm) return setConfirm(null)
+      if (modal === 'how') return setModal(null)
+      if (modal === 'settings') return // handled by the settings window itself
+      if (screen === 'game' && !over) setPaused((p) => !p)
+      return
+    }
+    const tag = (e.target as HTMLElement | null)?.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return
+    if (e.key === 'm' || e.key === 'M') return setSound((v) => !v)
+    if (e.key === ' ') {
+      e.preventDefault(); (document.activeElement as HTMLElement | null)?.blur()
+      if (screen === 'game' && !over && !modal && !confirm) setPaused((p) => !p)
+    }
   }
-  const jump = (i: number) => {
-    setCur(i); clear()
-    const F: DiskState[] = ['ok', 'failed', 'ok', 'ok']
-    const err = '> !! ERROR: Disk 2 terbakar / tidak merespons'
-    if (i === 0) { setScreen('start'); setModal(null); setDark(false); setOver(null) }
-    if (i === 1) { setScreen('start'); setModal('how'); setDark(false); setOver(null) }
-    if (i === 2) setup({ raid: null, text: '', dark: false, lines: ['raid-shield:~$ menunggu perintah...'] })
-    if (i === 3) setup({ raid: 'RAID 5', text: 'DATA', lines: ['> RAID 5 dipilih (75% kapasitas tersedia)'] })
-    if (i === 4) { setup({ raid: 'RAID 5', text: 'DATA', lines: [] }); store('RAID 5', 'DATA'); setDemo(true) }
-    if (i === 5) setup({ raid: 'RAID 5', text: 'DATA', stored: true, day: 4, money: 1580, lines: ['> Data berhasil disimpan. Server online, hari berjalan!'] })
-    if (i === 6) setup({ raid: 'RAID 5', text: 'DATA', stored: true, disks: F, day: 9, money: 1730, popup: true, lines: ['> Data berhasil disimpan.', err, '> Mode DEGRADED: RAID 5 tetap berjalan. Beli pengganti untuk Disk 2'] })
-    if (i === 7) setup({ raid: 'RAID 5', text: 'DATA', stored: true, disks: ['ok', 'rebuilding', 'ok', 'ok'], step: 4, day: 9, money: 1630, lines: [err, '> Disk pengganti untuk Disk 2 dipasang ($100).', '> Reading surviving blocks...', '> Data Blok 1 [D] ⊕ Data Blok 3 [T] ⊕ Parity [P] = Recovering Data Blok 2 [A]'] })
-    if (i === 8) setup({ raid: 'RAID 0', text: 'DATA', stored: true, disks: F, day: 6, money: 1620, over: { kind: 'lost', reason: R_RAID0 }, lines: ['> Data berhasil disimpan.', err, '> !! GAME OVER: RAID 0 kehilangan 1 disk.'] })
-    if (i === 9) setup({ raid: 'RAID 5', text: 'DATA', stored: true, disks: F, dark: true, day: 9, money: 1730, popup: true, lines: ['> Data berhasil disimpan.', err, '> Mode DEGRADED: RAID 5 tetap berjalan.'] })
-    if (i === 10) setup({ raid: 'RAID 5', text: 'DATA', stored: true, disks: F, day: 14, money: 40, over: { kind: 'lost', reason: R_NOMONEY }, lines: [err, '> !! GAME OVER: Uang habis.'] })
-    if (i === 12) { setScreen('start'); setModal(null); setDark(true); setOver(null) }
-    if (i === 13) setup({ raid: 'RAID 5', text: 'DATA', stored: true, disks: ['ok', 'failed', 'failed', 'ok'], dark: true, day: 17, money: 1180, over: { kind: 'lost', reason: '2 disk RAID 5 rusak bersamaan' }, lines: [err, '> !! GAME OVER: 2 disk rusak.'] })
-    if (i === 14) setup({ raid: 'RAID 5', text: 'DATA', stored: true, dark: true, day: 30, money: 1640, over: { kind: 'win', reason: '' }, lines: ['> Hari ke-30 tercapai. Server selamat!'] })
-    if (i === 15) setup({ raid: 'RAID 5', text: 'DATA', stored: true, disks: ['ok', 'replaced', 'ok', 'ok'], day: 30, money: 1500, lines: [err, '> Disk pengganti dipasang. Klik "Jalankan Rebuild Data"'] })
-    if (i === 11) setup({ raid: 'RAID 10', text: 'DATA', stored: true, day: 30, money: 2010, over: { kind: 'win', reason: '' }, lines: ['> Hari ke-30 tercapai. Server selamat!'] })
-  }
+  const risk = Math.min(1, ((0.03 + day * 0.008) * [0.6, 1, 1.5][diff]) / 0.405)
+  const riskColor = risk < 0.34 ? '#8CB35C' : risk < 0.67 ? '#FFE94D' : '#D97F3D'
 
   /* ---- disk view ---- */
   const roles = (d: number) => {
@@ -249,19 +282,19 @@ export default function App() {
   return (
     <div className="min-h-screen flex flex-col items-center" style={{ background: '#1d1b26' }}>
       <div style={{ width: 1440 * scale, height: 1024 * scale }}>
-        <div className={`frame ${dark ? 'dark' : ''} ${lost ? 'shake' : ''}`} style={{ transform: `scale(${scale})`, ['--s' as string]: scale }}>
-          {screen === 'start' && <StartScreen onStart={pressStart} onHow={() => setModal('how')} onSettings={() => setModal('settings')} />}
+        <div className={`frame ${dark ? 'dark' : ''} ${lost ? 'shake' : ''}`} style={{ transform: `scale(${scale})`, ['--s' as string]: scale }} onClickCapture={(e) => { const b = (e.target as HTMLElement).closest('button'); if (b && !b.disabled) sfx.play('click') }}>
+          {screen === 'start' && <StartScreen onStart={pressStart} onHow={() => setModal('how')} onSettings={() => openSettings('start')} record={records} />}
 
           {screen === 'game' && (<>
           <Decor />
 
           {/* HEADER */}
-          <header className="absolute left-0 right-0 top-0 flex items-center gap-4 px-6" style={{ height: 72, background: 'var(--card)', borderBottom: '3px solid var(--ink)', zIndex: 30 }}>
+          <header className="absolute left-0 right-0 top-0 flex items-center gap-3 px-6" style={{ height: 72, background: 'var(--card)', borderBottom: '3px solid var(--ink)', zIndex: 30 }}>
             <div className="flex items-center gap-3">
               <Sticker bg="#FFE94D" rot={-5} className="!p-2 !rounded-xl"><Pixel name="trex" size={4} /></Sticker>
               <span className="font-display" style={{ fontSize: 30, fontWeight: 800, letterSpacing: '-0.02em' }}>RAID-Shield</span>
             </div>
-            <div className="nb flex items-center gap-3 px-4 py-2 rounded-full ml-3" style={{ background: 'var(--card)' }}>
+            <div className="nb flex items-center gap-3 px-4 py-2 rounded-full" style={{ background: 'var(--card)' }}>
               <span className="rounded-full" style={{ width: 16, height: 16, background: statusColor, border: '3px solid var(--ink)' }} />
               <span className="font-display whitespace-nowrap" style={{ fontWeight: 800, letterSpacing: '.05em', fontSize: 17 }}>STATUS: {status}</span>
             </div>
@@ -272,6 +305,11 @@ export default function App() {
                 <div className="font-display font-extrabold text-[15px] leading-none mb-1">HARI {day}/30</div>
                 <div className="rounded-full overflow-hidden" style={{ height: 8, border: '2px solid #111', background: '#fff' }}><div style={{ width: `${(day / 30) * 100}%`, height: '100%', background: '#3B4BDB', transition: 'width .4s' }} /></div>
               </div>
+            </div>
+            {/* RISIKO */}
+            <div className="nb rounded-xl px-2.5 py-1" style={{ background: 'var(--card)', width: 124, transform: 'rotate(1deg)', boxShadow: '3px 3px 0 var(--ink)' }}>
+              <div className="text-[9.5px] font-extrabold tracking-wide leading-none mb-1.5 whitespace-nowrap">RISIKO BENCANA</div>
+              <div className="rounded-full overflow-hidden" style={{ height: 12, border: '2px solid var(--ink)', background: 'var(--soft)' }}><div style={{ width: `${Math.max(6, risk * 100)}%`, height: '100%', background: riskColor, borderRight: '2px solid var(--ink)', transition: 'width .4s, background .4s' }} /></div>
             </div>
             {/* POIN */}
             <div className={`nb relative flex items-center gap-2 px-3 py-1 rounded-xl ${lowMoney ? 'pulse-warn' : ''}`} style={{ background: '#A8E6CF', color: '#111', transform: 'rotate(1.5deg)', width: 160, height: 46 }}>
@@ -285,6 +323,10 @@ export default function App() {
                 {paused ? 'LANJUT' : 'PAUSE'}
               </button>
               <button aria-label="Cara bermain" onClick={() => setModal('how')} className="btn rounded-full font-display" style={{ width: 44, height: 44, background: '#FFE94D', fontSize: 22, fontWeight: 800 }}>?</button>
+              <button aria-label="Pengaturan" disabled={!!over} onClick={() => openSettings('header')} className="btn rounded-full grid place-items-center" style={{ width: 44, height: 44, background: '#B9A8F5' }}><Pixel name="gear" color="#fff" size={3} /></button>
+              <button aria-label={sound ? 'Matikan suara' : 'Nyalakan suara'} onClick={() => setSound((v) => !v)} className="btn rounded-full grid place-items-center" style={{ width: 44, height: 44, background: sound ? '#A8E6CF' : '#e2dccd' }}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="#fff" stroke="#111" strokeWidth="2.4" strokeLinejoin="round" strokeLinecap="round"><path d="M3 9h4l5-4v14l-5-4H3z" />{sound ? <path d="M16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12" fill="none" /> : <path d="M16 9l5 6M21 9l-5 6" fill="none" />}</svg>
+              </button>
               <button aria-label="Toggle theme" onClick={() => setDark(!dark)} className="btn relative flex items-center rounded-full" style={{ width: 96, height: 44, background: dark ? '#3B4BDB' : '#FFE94D' }}>
                 <svg className="absolute left-2" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#111" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="4" fill="#fff" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2" /></svg>
                 <svg className="absolute right-2" width="22" height="22" viewBox="0 0 24 24" fill="#fff" stroke="#111" strokeWidth="2.5" strokeLinejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z" /></svg>
@@ -302,7 +344,7 @@ export default function App() {
                     <label htmlFor="in" className="font-bold text-[15px]">Input Data</label>
                     <Sticker bg="#A8E6CF" rot={4} className="!text-[11px] !py-0">{text.length}/12</Sticker>
                   </div>
-                  <input id="in" value={text} maxLength={12} disabled={lockPick} placeholder="Ketik: DATA" onChange={(e) => { setDemo(false); resetSim(raid, e.target.value.toUpperCase()); setLines(['> Input diubah: siap diproses']) }}
+                  <input id="in" value={text} maxLength={12} disabled={lockPick} placeholder="Ketik: DATA" onChange={(e) => { resetSim(raid, e.target.value.toUpperCase()); setLines(['> Input diubah: siap diproses']) }}
                     className="nb w-full px-4 py-3 rounded-xl font-mono outline-none focus:bg-[#FFF6B8] focus:text-[#111] disabled:opacity-60" style={{ background: 'var(--card)', fontSize: 18, fontWeight: 700, letterSpacing: '.1em', boxShadow: '4px 4px 0 var(--ink)' }} />
                 </div>
 
@@ -320,8 +362,8 @@ export default function App() {
 
                 <div className="flex flex-col gap-3 mt-1">
                   <div className="font-bold text-[15px] -mb-1">Action Center</div>
-                  <button disabled={!canStore} onClick={() => { setCur(4); store(raid!, text) }} className="btn px-4 py-4 text-[17px]" style={{ background: '#3B4BDB', color: '#fff' }}>Proses Penyimpanan</button>
-                  <button disabled={!canRebuild} onClick={() => { setCur(7); startRebuild() }} className="btn px-4 py-6 text-[20px]" style={{ background: '#8CB35C' }}>Jalankan Rebuild Data</button>
+                  <button disabled={!canStore} onClick={() => { store(raid!, text) }} className="btn px-4 py-4 text-[17px]" style={{ background: '#3B4BDB', color: '#fff' }}>Proses Penyimpanan</button>
+                  <button disabled={!canRebuild} onClick={() => { startRebuild() }} className="btn px-4 py-6 text-[20px]" style={{ background: '#8CB35C' }}>Jalankan Rebuild Data</button>
                   {debug && <button disabled={!canFail} onClick={manualFail} className="btn px-3 py-1 text-[12px]" style={{ background: '#D97F3D' }}>Debug: Rusakkan Drive</button>}
                   <div className="text-[12px] opacity-70 leading-snug">
                     {raid === 'RAID 0' ? 'RAID 0 tidak bisa di-rebuild.' : failedCount > 0 ? 'Beli disk pengganti ($100) dulu, lalu rebuild.' : 'Rebuild aktif setelah disk rusak dan diganti.'}
@@ -410,6 +452,13 @@ export default function App() {
                   </div>
                 )}
 
+                <div className="absolute left-5" style={{ bottom: 56, transform: 'rotate(-2deg)', maxWidth: 520 }}>
+                  <div className="nb rounded-xl px-3 py-1.5 flex gap-3 items-center" style={{ background: '#A8E6CF', color: '#111' }}>
+                    <Sticker bg="#FFE94D" rot={-6} className="!text-[11px]">TAHUKAH KAMU?</Sticker>
+                    <span className="text-[13px] font-bold leading-snug">{TIPS[tipIdx]}</span>
+                  </div>
+                </div>
+
                 {popup && !over && failedCount > 0 && (
                   <div className="absolute pop" style={{ left: 330, top: 300, width: 330, zIndex: 20, transform: 'rotate(-2deg)' }}>
                     <Win title="SYSTEM FAILURE" color="#D97F3D" onClose={() => setPopup(false)}>
@@ -439,13 +488,13 @@ export default function App() {
               <div className="flex-1 flex items-center gap-5 px-5">
                 <div className="relative flex-none" style={{ width: 128, height: 128 }}>
                   <svg width="128" height="128" viewBox="0 0 128 128" style={{ transform: 'rotate(-90deg)' }}>
-                    <circle cx="64" cy="64" r="46" fill="none" stroke="var(--ink)" strokeWidth="38" />
-                    <circle cx="64" cy="64" r="46" fill="none" stroke="#D97F3D" strokeWidth="30" />
-                    {avail > 0 && <circle cx="64" cy="64" r="46" fill="none" stroke="#8CB35C" strokeWidth="30" strokeDasharray={`${(avail / 100) * 289.03} 289.03`} style={{ transition: 'stroke-dasharray .5s' }} />}
-                    {avail > 0 && avail < 100 && <line x1="64" y1="3" x2="64" y2="33" stroke="var(--ink)" strokeWidth="3" />}
-                    {avail > 0 && avail < 100 && <line x1="64" y1="3" x2="64" y2="33" stroke="var(--ink)" strokeWidth="3" transform={`rotate(${avail * 3.6} 64 64)`} />}
+                    <circle cx="64" cy="64" r="50" fill="none" stroke="var(--ink)" strokeWidth="26" />
+                    <circle cx="64" cy="64" r="50" fill="none" stroke="#D97F3D" strokeWidth="20" />
+                    {avail > 0 && <circle cx="64" cy="64" r="50" fill="none" stroke="#8CB35C" strokeWidth="20" strokeDasharray={`${(avail / 100) * 314.16} 314.16`} style={{ transition: 'stroke-dasharray .5s' }} />}
+                    {avail > 0 && avail < 100 && <line x1="64" y1="1" x2="64" y2="27" stroke="var(--ink)" strokeWidth="3" />}
+                    {avail > 0 && avail < 100 && <line x1="64" y1="1" x2="64" y2="27" stroke="var(--ink)" strokeWidth="3" transform={`rotate(${avail * 3.6} 64 64)`} />}
                   </svg>
-                  <div className="absolute inset-0 grid place-items-center font-display" style={{ fontSize: 26, fontWeight: 800 }}>{avail}%</div>
+                  <div className="absolute inset-0 grid place-items-center font-display" style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.02em' }}>{avail}%</div>
                 </div>
                 <div className="flex flex-col gap-2 text-[14px] font-bold">
                   <div className="flex items-center gap-2"><span className="inline-block" style={{ width: 18, height: 18, background: '#8CB35C', border: '3px solid var(--ink)', borderRadius: 4 }} />Kapasitas Tersedia <span className="font-mono ml-1">{avail}%</span></div>
@@ -457,19 +506,16 @@ export default function App() {
           </section>
           <style>{`section > div:first-child{width:60%}section > div:last-child{width:40%}`}</style>
 
-          {paused && !over && !modal && (
-            <Overlay>
-              <div className="modal-in" style={{ width: 380 }}>
-                <Win title="PAUSED.exe" color="#B9A8F5" style={{ boxShadow: '8px 8px 0 var(--ink)' }}>
-                  <div className="p-6 text-center">
-                    <div className="font-display" style={{ fontSize: 40, fontWeight: 800 }}>PAUSE</div>
-                    <div className="text-[14px] mb-4">Waktu server berhenti sementara.</div>
-                    <button onClick={() => setPaused(false)} className="btn w-full py-3 text-[18px]" style={{ background: '#8CB35C' }}>LANJUTKAN</button>
-                  </div>
-                </Win>
+          {countdown !== null && !paused && !modal && (
+            <div className="absolute grid place-items-center pointer-events-none" style={{ left: 0, right: 0, top: 380, zIndex: 55 }}>
+              <div key={countdown} className="pop flex items-center gap-4">
+                <Sticker bg="#FFE94D" rot={-4} className="!text-[16px] !px-5 !py-1">LANJUT DALAM</Sticker>
+                <span className="nb grid place-items-center font-display rounded-2xl" style={{ width: 120, height: 120, background: '#3B4BDB', color: '#fff', fontSize: 84, fontWeight: 800, transform: 'rotate(4deg)', boxShadow: '8px 8px 0 var(--ink)' }}>{countdown}</span>
               </div>
-            </Overlay>
+            </div>
           )}
+
+          <div className="absolute left-0 right-0 text-center font-mono pointer-events-none" style={{ bottom: 2, fontSize: 11, opacity: 0.75, zIndex: 10 }}>Spasi: Pause | Esc: Menu | M: Suara</div>
           </>)}
 
           {screen === 'game' && day >= 30 && damaged > 0 && !over && (
@@ -477,19 +523,16 @@ export default function App() {
           )}
           {lost && <div className="gflash" key="gf" />}
           {lost && <GameOverPopup reason={over!.reason} day={day} points={money} raid={raid} onRetry={startGame} onMenu={toMenu} />}
-          {over?.kind === 'win' && <WinPopup points={money} raid={raid} onAgain={startGame} onMenu={toMenu} />}
+          {over?.kind === 'win' && <WinPopup points={money} raid={raid} record={newRecord} onAgain={startGame} onMenu={toMenu} />}
           {screen === 'game' && !over && <button className={`dbg ${debug ? 'on' : ''}`} onClick={() => setDebug((d) => !d)}>Debug {debug ? 'ON' : 'off'}</button>}
+          {screen === 'game' && paused && !over && !modal && !confirm && (
+            <PauseMenu onResume={() => setPaused(false)} onHow={() => setModal('how')} onSettings={() => openSettings('pause')} onRetry={() => setConfirm('retry')} onMenu={() => setConfirm('menu')} />
+          )}
           {modal === 'how' && <HowTo onClose={() => setModal(null)} onOk={() => (screen === 'start' ? startGame() : setModal(null))} />}
-          {modal === 'settings' && <Settings onClose={() => setModal(null)} dark={dark} setDark={setDark} diff={diff} setDiff={setDiff} />}
+          {modal === 'settings' && <Settings diff={diff} speed={speed} dark={dark} sound={sound} setDark={setDark} setSound={setSound} onSave={(d, sp) => { setDiff(d); setSpeed(sp); closeSettings() }} onCancel={closeSettings} />}
+          {confirm && <Confirm onYes={() => (confirm === 'retry' ? startGame() : toMenu())} onNo={() => setConfirm(null)} />}
         </div>
       </div>
-
-      <nav className="flex items-center gap-2 flex-wrap justify-center px-4" style={{ minHeight: 64, paddingTop: 8, maxWidth: 1440 }}>
-        <span className="text-white/60 text-xs font-bold mr-2">FLOW PROTOTYPE</span>
-        {JUMPS.map((j, i) => (
-          <button key={j} className={`jump ${cur === i ? 'cur' : ''}`} onClick={() => jump(i)}>{j}</button>
-        ))}
-      </nav>
     </div>
   )
 }

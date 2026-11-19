@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { Pixel, Sticker, Win } from './ui'
 
 const Squiggle = ({ color = 'var(--ink)', w = 200, className = '', style }: { color?: string; w?: number; className?: string; style?: React.CSSProperties }) => (
@@ -8,7 +9,7 @@ function Float({ name, color, size, x, y, rot = 0, delay = 0 }: { name: string; 
   return <div className="absolute drift" style={{ left: x, top: y, ['--r' as string]: `${rot}deg`, animationDelay: `${delay}s` }}><Pixel name={name} color={color} size={size} /></div>
 }
 
-export function StartScreen({ onStart, onHow, onSettings }: { onStart: () => void; onHow: () => void; onSettings: () => void }) {
+export function StartScreen({ onStart, onHow, onSettings, record }: { onStart: () => void; onHow: () => void; onSettings: () => void; record: { bestScore: number; bestDays: number } }) {
   return (
     <div className="absolute inset-0" style={{ zIndex: 5 }}>
       {/* shapes */}
@@ -43,6 +44,11 @@ export function StartScreen({ onStart, onHow, onSettings }: { onStart: () => voi
       <Win title="Are you ready?" color="#A8E6CF" className="absolute drift" style={{ left: 90, top: 790, width: 250, ['--r' as string]: '3deg', animationDelay: '1.5s' } as React.CSSProperties}>
         <div className="p-3 flex gap-2"><span className="btn flex-1 text-center py-1 text-[13px]" style={{ background: '#8CB35C' }}>YES</span><span className="btn flex-1 text-center py-1 text-[13px]" style={{ background: '#F7A8C8' }}>NO</span></div>
       </Win>
+
+      <div className="absolute flex gap-3 items-center" style={{ left: 760, top: 96, zIndex: 4 }}>
+        <Sticker bg="#FFE94D" rot={4} className="!text-[15px] !px-4">REKOR: {record.bestScore} Poin</Sticker>
+        <Sticker bg="#F7A8C8" rot={-4} className="!text-[13px]">TERLAMA: {record.bestDays} Hari</Sticker>
+      </div>
 
       {/* center window */}
       <div className="absolute" style={{ left: 340, top: 150, width: 760 }}>
@@ -127,27 +133,99 @@ export function HowTo({ onClose, onOk }: { onClose: () => void; onOk: () => void
   )
 }
 
-export function Settings({ onClose, dark, setDark, diff, setDiff }: { onClose: () => void; dark: boolean; setDark: (b: boolean) => void; diff: number; setDiff: (n: number) => void }) {
-  const levels = ['Santai', 'Normal', 'Sulit']
+function Group({ label, note, children }: { label: string; note?: string; children: React.ReactNode }) {
   return (
-    <Overlay onClose={onClose}>
+    <div>
+      <div className="font-bold mb-2">{label}</div>
+      <div className="flex gap-3">{children}</div>
+      {note && <div className="text-[12px] opacity-70 mt-1.5">{note}</div>}
+    </div>
+  )
+}
+
+export function Settings({ diff, speed, dark, sound, setDark, setSound, onSave, onCancel }: {
+  diff: number; speed: 1 | 2; dark: boolean; sound: boolean
+  setDark: (b: boolean) => void; setSound: (b: boolean) => void
+  onSave: (diff: number, speed: 1 | 2) => void; onCancel: () => void
+}) {
+  const snap = useRef({ dark, sound })
+  const [dDiff, setDDiff] = useState(diff)
+  const [dSpeed, setDSpeed] = useState<1 | 2>(speed)
+  const cancel = () => { setDark(snap.current.dark); setSound(snap.current.sound); onCancel() }
+  const cancelRef = useRef(cancel)
+  cancelRef.current = cancel
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') cancelRef.current() }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [])
+  const levels = ['Santai', 'Normal', 'Sulit']
+  const Opt = ({ on, onClick, children }: { on: boolean; onClick: () => void; children: React.ReactNode }) => (
+    <button onClick={onClick} className={`pick flex-1 py-2 text-center font-bold ${on ? 'on' : ''}`} aria-pressed={on}>{children}</button>
+  )
+  return (
+    <Overlay onClose={cancel}>
       <div className="modal-in" style={{ width: 460 }}>
-        <Win title="PENGATURAN.exe" color="#B9A8F5" onClose={onClose} style={{ boxShadow: '8px 8px 0 var(--ink)' }}>
-          <div className="p-6 flex flex-col gap-5">
-            <div>
-              <div className="font-bold mb-2">Tingkat Bencana</div>
-              <div className="flex gap-3">
-                {levels.map((l, i) => <button key={l} onClick={() => setDiff(i)} className={`pick flex-1 py-2 text-center font-bold ${diff === i ? 'on' : ''}`}>{l}</button>)}
-              </div>
+        <Win title="PENGATURAN.exe" color="#B9A8F5" onClose={cancel} style={{ boxShadow: '8px 8px 0 var(--ink)' }}>
+          <div className="p-6 flex flex-col gap-4">
+            <Group label="Tingkat Bencana" note="Berlaku mulai hari berikutnya">
+              {levels.map((l, i) => <Opt key={l} on={dDiff === i} onClick={() => setDDiff(i)}>{l}</Opt>)}
+            </Group>
+            <Group label="Tema">
+              <Opt on={!dark} onClick={() => setDark(false)}>Terang</Opt>
+              <Opt on={dark} onClick={() => setDark(true)}>Gelap</Opt>
+            </Group>
+            <Group label="Suara">
+              <Opt on={sound} onClick={() => setSound(true)}>Nyala</Opt>
+              <Opt on={!sound} onClick={() => setSound(false)}>Mati</Opt>
+            </Group>
+            <Group label="Kecepatan Game" note="Berlaku mulai hari berikutnya">
+              <Opt on={dSpeed === 1} onClick={() => setDSpeed(1)}>1x</Opt>
+              <Opt on={dSpeed === 2} onClick={() => setDSpeed(2)}>2x</Opt>
+            </Group>
+            <div className="flex gap-3 mt-1">
+              <button onClick={() => onSave(dDiff, dSpeed)} className="btn flex-1 py-3 text-[17px]" style={{ background: '#8CB35C' }}>SIMPAN</button>
+              <button onClick={cancel} className="btn flex-1 py-3 text-[17px]" style={{ background: '#FBF3E4' }}>BATAL</button>
             </div>
-            <div>
-              <div className="font-bold mb-2">Tema</div>
-              <div className="flex gap-3">
-                <button onClick={() => setDark(false)} className={`pick flex-1 py-2 text-center font-bold ${!dark ? 'on' : ''}`}>Terang</button>
-                <button onClick={() => setDark(true)} className={`pick flex-1 py-2 text-center font-bold ${dark ? 'on' : ''}`}>Gelap</button>
-              </div>
+          </div>
+        </Win>
+      </div>
+    </Overlay>
+  )
+}
+
+export function PauseMenu({ onResume, onHow, onSettings, onRetry, onMenu }: { onResume: () => void; onHow: () => void; onSettings: () => void; onRetry: () => void; onMenu: () => void }) {
+  return (
+    <Overlay>
+      <div className="modal-in relative" style={{ width: 420 }}>
+        <Win title="PAUSE.EXE" color="#B9A8F5" onClose={onResume} style={{ boxShadow: '8px 8px 0 var(--ink)' }}>
+          <div className="p-6 flex flex-col gap-3">
+            <div className="font-display text-center" style={{ fontSize: 44, fontWeight: 800, lineHeight: 1 }}>PAUSE</div>
+            <div className="text-center text-[13px] opacity-70 mb-1">Waktu server berhenti sementara.</div>
+            <button onClick={onResume} className="btn py-3 text-[19px]" style={{ background: '#8CB35C' }}>LANJUTKAN</button>
+            <button onClick={onHow} className="btn py-3 text-[17px]" style={{ background: '#FFE94D' }}>CARA BERMAIN</button>
+            <button onClick={onSettings} className="btn py-3 text-[17px]" style={{ background: '#B9A8F5' }}>PENGATURAN</button>
+            <button onClick={onRetry} className="btn py-3 text-[17px]" style={{ background: '#D97F3D' }}>ULANGI GAME</button>
+            <button onClick={onMenu} className="btn py-3 text-[17px]" style={{ background: '#FBF3E4' }}>MENU UTAMA</button>
+          </div>
+        </Win>
+        <div className="absolute" style={{ right: -22, top: -16 }}><Sticker bg="#FFE94D" rot={7} className="!text-[14px]">GAME DIJEDA</Sticker></div>
+      </div>
+    </Overlay>
+  )
+}
+
+export function Confirm({ onYes, onNo }: { onYes: () => void; onNo: () => void }) {
+  return (
+    <Overlay onClose={onNo}>
+      <div className="modal-in relative" style={{ width: 400 }}>
+        <Win title="ARE YOU SURE?" color="#FF7A5C" onClose={onNo} style={{ boxShadow: '8px 8px 0 var(--ink)' }}>
+          <div className="p-6">
+            <div className="flex gap-4 items-center mb-5"><Pixel name="warn" color="#FFE94D" size={5} /><div className="font-bold text-[17px] leading-snug">Progres game akan hilang. Lanjut?</div></div>
+            <div className="flex gap-3">
+              <button onClick={onYes} className="btn flex-1 py-3 text-[18px]" style={{ background: '#D97F3D' }}>YA</button>
+              <button onClick={onNo} className="btn flex-1 py-3 text-[18px]" style={{ background: '#FBF3E4' }}>BATAL</button>
             </div>
-            <button onClick={onClose} className="btn py-3 text-[17px]" style={{ background: '#8CB35C' }}>SIMPAN</button>
           </div>
         </Win>
       </div>

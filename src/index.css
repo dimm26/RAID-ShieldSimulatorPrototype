@@ -67,9 +67,6 @@
 
 .term::-webkit-scrollbar { width: 10px; }
 .term::-webkit-scrollbar-thumb { background: #8CB35C; border: 2px solid #333; }
-.jump { border: 2px solid #fff; color: #fff; background: transparent; border-radius: 999px; padding: 4px 12px; font-size: 12px; font-weight: 700; }
-.jump:hover { background: #FFE94D; color: #111; border-color: #FFE94D; }
-.jump.cur { background: #FFE94D; color: #111; border-color: #FFE94D; }
 
 /* ---- game additions ---- */
 .pick:disabled:not(.on) { opacity: .55; cursor: not-allowed; box-shadow: 4px 4px 0 var(--ink); transform: none; }
